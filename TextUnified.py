@@ -19,14 +19,21 @@ with open ('arch.json', 'r') as f:
 architecture, hyperparameters = returnArch(arch_data, task, mainType, archType)
 
 model = TextModel(
-    dataset_url='train.csv',
+    dataset_url='bbc-text.csv',
     hasChanged=False,
     task='text',
     mainType='topic classification',
-    archType='Default',
+    archType='default',
     architecture=architecture,
     hyperparameters=hyperparameters
 )
 
-model_result = model.execute()
-print(model_result)
+executor = model.execute()
+for epoch_info in executor:
+    if isinstance(epoch_info, dict) and 'epoch' in epoch_info:
+        print(f"Epoch {epoch_info['epoch']}: Train Loss: {epoch_info['train_loss']:.4f}, "
+              f"Train Acc: {epoch_info['train_acc']:.4f}, Val Loss: {epoch_info['val_loss']:.4f}, "
+              f"Val Acc: {epoch_info['val_acc']:.4f}")
+    else:
+        print("Final model object:", epoch_info)
+        break

@@ -10,7 +10,6 @@ def returnArch(data, task, mainType, archType):
         if i["type"] == mainType and i["archType"] == archType:
             return i["architecture"], i["hyperparameters"]
 
-
 if __name__ == "__main__":
     dataset_url = "insurance.csv"  # will be sent by user
     hasChanged = False  # will be sent by user
@@ -18,7 +17,7 @@ if __name__ == "__main__":
     mainType = "DL"  # will be sent by user
     archType = "default"  # will be sent by user
     arch_data = {}  # will be sent by user if hasChanged = true
-
+    
     with open('arch.json', 'r') as f:
         arch_data = json.load(f)
 
@@ -30,8 +29,16 @@ if __name__ == "__main__":
                 arch_data, task, mainType, archType)
             model_trainer = RegressionDL(
                 dataset_url, hasChanged, task, mainType, archType, architecture, hyperparameters)
-            model_obj = model_trainer.execute()
-            print(model_obj)
+            print("executing")
+            executor = model_trainer.execute()
+            
+            for epoch_info in executor:
+                if isinstance(epoch_info, dict) and 'epoch' in epoch_info:
+                    print(f"Epoch {epoch_info['epoch']}: Train Loss: {epoch_info['train_loss']:.4f}, Test Loss: {epoch_info['test_loss']:.4f}")
+                else:
+                    print("Final model object:", epoch_info)
+                    break
+
         elif mainType == "ML":
             print("In ML")
             architecture, hyperparameters = returnArch(
