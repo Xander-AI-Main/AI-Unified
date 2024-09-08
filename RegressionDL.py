@@ -14,6 +14,8 @@ import uuid
 import queue
 import threading
 import random
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import LabelEncoder
 
 class RegressionDL:
     def __init__(self, dataset_url, hasChanged, task, mainType, archType, architecture, hyperparameters, userId):
@@ -23,17 +25,18 @@ class RegressionDL:
         self.architecture = architecture
         self.hasChanged = hasChanged
         self.hyperparameters = hyperparameters
-        self.data, self.target_col = self.load_and_prepare_data()
+        self.data, self.target_col, self.label_encoder = self.load_and_prepare_data()
         self.task_type = task
         self.model = None
         self.scaler = StandardScaler()
         self.model_file_path = f'model{str(uuid.uuid4())}.h5'
         self.scaler_file_path = f'scaler{str(uuid.uuid4())}.pkl'
+        self.label_encoder_path = f'label_encoder{str(uuid.uuid4())}.pkl'
         self.directory_path = "models"
         self.complete_model_path = os.path.join(self.directory_path, self.model_file_path)
         self.complete_scaler_path = os.path.join(self.directory_path, self.scaler_file_path)
-        self.api_url = 'https://s3-api-uat.idesign.market/api/upload'
-        self.bucket_name = 'idesign-quotation'
+        self.complete_label_encoder_path = os.path.join(self.directory_path, self.label_encoder_path)
+        self.api_url = 'https://api.xanderco.in/core/store/'
         self.epoch_info_queue = queue.Queue()
         self.userId = userId
 
@@ -42,22 +45,29 @@ class RegressionDL:
         uni = list(set(data))
         return uni.index(value)
 
+    
     def load_and_prepare_data(self):
         df = pd.read_csv(self.dataset_url)
+        df = df.dropna()
+        df = df.iloc[:25000]
+        columns_to_drop = [col for col in df.columns if 'id' in col.lower()]
+        df = df.drop(columns=columns_to_drop)
         target_col = df.columns[-1]
+        
+        label_encoders = {}
+        
         for column_name in df.columns:
             unique_values = df[column_name].nunique()
             print(unique_values)
-            if unique_values <= 4 and df[column_name].dtype in ['object', 'string']:
-                dummies = pd.get_dummies(df[column_name], prefix=column_name)
-                df = pd.concat([df, dummies], axis=1)
-                df = df.drop(columns=[column_name])
-                print(f"Dummies created for column '{column_name}'.")
-
-        string_columns = df.select_dtypes(include=['object']).columns
-        df = df.drop(columns=string_columns)
+            print(df[column_name].dtype)
+            if df[column_name].dtype in ['object']:
+                le = LabelEncoder()
+                df[column_name] = le.fit_transform(df[column_name])
+                label_encoders[column_name] = le
+                print(f"Label encoding applied to column '{column_name}'.")
+        
         print(df)
-        return df, target_col
+        return df, target_col, label_encoders
 
     def determine_task_type(self):
         target_values = self.data[self.target_col]
@@ -71,12 +81,6 @@ class RegressionDL:
         input_shape = (self.data.shape[1] - 1,)
         if self.archType == 'default':
             self.model = self.build_dense_model(input_shape)
-        # elif self.archType == '4':
-        #     self.build_cnn_model(input_shape)
-        # elif self.archType == '5':
-        #     self.build_lstm_model(input_shape)
-        # elif self.archType == '6':
-        #     self.build_attention_model(input_shape)
         else:
             raise ValueError(
                 "Unsupported model type. Choose from 'dense', 'cnn', 'lstm', 'attention'.")
@@ -90,48 +94,6 @@ class RegressionDL:
             model.add(tf.keras.layers.Dropout(0.4))
         model.add(Dense(1, activation=output_activation))
         return model
-
-    # def build_cnn_model(self, input_shape, conv_layers=[(32, (3, 3)), (64, (3, 3))], dense_layers=[64], activation='relu', output_activation=None):
-    #     model = Sequential()
-    #     model.add(Input(shape=input_shape))
-    #     for filters, kernel_size in conv_layers:
-    #         model.add(Conv2D(filters, kernel_size, activation=activation))
-    #     model.add(Flatten())
-    #     for layer in dense_layers:
-    #         model.add(Dense(layer, activation=activation))
-    #     if self.task_type == 'regression':
-    #         model.add(Dense(1, activation=output_activation))
-    #     else:
-    #         model.add(Dense(len(np.unique(self.data[self.target_col])), activation='softmax'))
-    #     self.model = model
-    #     return model
-
-    # def build_lstm_model(self, input_shape, lstm_units=50, dense_layers=[64], activation='relu', output_activation=None):
-    #     model = Sequential()
-    #     model.add(LSTM(lstm_units, input_shape=input_shape, activation=activation))
-    #     for layer in dense_layers:
-    #         model.add(Dense(layer, activation=activation))
-    #     if self.task_type == 'regression':
-    #         model.add(Dense(1, activation=output_activation))
-    #     else:
-    #         model.add(Dense(len(np.unique(self.data[self.target_col])), activation='softmax'))
-    #     self.model = model
-    #     return model
-
-    # def build_attention_model(self, input_shape, attention_units=50, dense_layers=[64], activation='relu', output_activation=None):
-    #     inputs = Input(shape=input_shape)
-    #     attention = Attention()([inputs, inputs])
-    #     flatten = Flatten()(attention)
-    #     x = flatten
-    #     for layer in dense_layers:
-    #         x = Dense(layer, activation=activation)(x)
-    #     if self.task_type == 'regression':
-    #         outputs = Dense(1, activation=output_activation)(x)
-    #     else:
-    #         outputs = Dense(len(np.unique(self.data[self.target_col])), activation='softmax')(x)
-    #     model = tf.keras.Model(inputs, outputs)
-    #     self.model = model
-    #     return model
 
     def compile_and_train(self):
         if not self.model:
@@ -203,24 +165,26 @@ class RegressionDL:
             os.makedirs(self.directory_path)
             model_path = os.path.join(self.directory_path, self.model_file_path)
             scaler_path = os.path.join(self.directory_path, self.scaler_file_path)
+            label_path = os.path.join(self.directory_path, self.label_encoder_path)
             self.model.save(model_path)
             joblib.dump(self.scaler, scaler_path)
+            joblib.dump(self.label_encoder, label_path)
         else:
             model_path = os.path.join(self.directory_path, self.model_file_path)
             scaler_path = os.path.join(self.directory_path, self.scaler_file_path)
+            label_path = os.path.join(self.directory_path, self.label_encoder_path)
             self.model.save(model_path)
             joblib.dump(self.scaler, scaler_path)
+            joblib.dump(self.label_encoder, label_path)
 
     def upload_files_to_api(self):
         try:
-            files = {
-                'bucketName': (None, self.bucket_name),
-                'files': open(self.complete_model_path, 'rb')
+            file = {
+                'file': open(self.complete_model_path, 'rb')
             }
-            response_model = requests.put(self.api_url, files=files)
+            response_model = requests.post(self.api_url, files=file)
             response_data_model = response_model.json()
-            model_url = response_data_model.get('locations', [])[
-                0] if response_model.status_code == 200 else None
+            model_url = response_data_model.get('file_url')
 
             if model_url:
                 print(f"Model uploaded successfully. URL: {model_url}")
@@ -229,14 +193,12 @@ class RegressionDL:
                     f"Failed to upload model. Error: {response_data_model.get('error')}")
                 return None, None
 
-            files = {
-                'bucketName': (None, self.bucket_name),
-                'files': open(self.complete_scaler_path, 'rb')
+            file = {
+                'file': open(self.complete_scaler_path, 'rb')
             }
-            response_scaler = requests.put(self.api_url, files=files)
+            response_scaler = requests.post(self.api_url, files=file)
             response_data_scaler = response_scaler.json()
-            scaler_url = response_data_scaler.get(
-                'locations', [])[0] if response_scaler.status_code == 200 else None
+            scaler_url = response_data_scaler.get('file_url')
 
             if scaler_url:
                 print(f"Scaler uploaded successfully. URL: {scaler_url}")
@@ -245,7 +207,21 @@ class RegressionDL:
                     f"Failed to upload scaler. Error: {response_data_scaler.get('error')}")
                 return model_url, None
 
-            return model_url, scaler_url
+            file = {
+                'file': open(self.complete_label_encoder_path, 'rb')
+            }
+            response_label = requests.post(self.api_url, files=file)
+            response_data_label = response_label.json()
+            label_url = response_data_label.get('file_url')
+
+            if label_url:
+                print(f"label uploaded successfully. URL: {label_url}")
+            else:
+                print(
+                    f"Failed to upload label. Error: {response_data_label.get('error')}")
+                return model_url, None
+
+            return model_url, scaler_url, label_url
 
         except requests.exceptions.RequestException as e:
             print(f"An error occurred: {str(e)}")
@@ -271,7 +247,7 @@ class RegressionDL:
 
         self.evaluate_model()
         self.save_model()
-        model_url, scaler_url = self.upload_files_to_api()
+        model_url, scaler_url, label_url = self.upload_files_to_api()
 
         _id = str(uuid.uuid4())
         df = pd.read_csv(self.dataset_url)
@@ -419,7 +395,7 @@ fetch(url, {{
             "modelUrl": model_url if model_url and scaler_url else "",
             "size": (os.path.getsize(self.complete_model_path) / (1024 ** 3) + os.path.getsize(self.complete_scaler_path) / (1024 ** 3)) if model_url and scaler_url else 0,
             "id": _id if model_url and scaler_url else "",
-            "helpers": [{"scaler": scaler_url}] if model_url and scaler_url else [],
+            "helpers": [{"scaler": scaler_url}, {"label_encoder": label_url}] if model_url and scaler_url else [],
             "modelArch": self.architecture,
             "hyperparameters": self.hyperparameters,
             "epoch_data": self.epoch_data,

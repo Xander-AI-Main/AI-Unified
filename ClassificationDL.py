@@ -1,9 +1,9 @@
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import tensorflow as tf
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, Add, Activation, Input
 from tensorflow.keras.callbacks import Callback
 import joblib
 import requests
@@ -13,6 +13,9 @@ import queue
 import threading
 import random
 import numpy as np
+from tensorflow.keras.regularizers import l2
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.feature_selection import mutual_info_classif
 
 class ClassificationDL:
     def __init__(self, dataset_url, hasChanged, task, mainType, archType, architecture, hyperparameters, userId):
@@ -23,56 +26,97 @@ class ClassificationDL:
         self.archType = archType
         self.architecture = architecture
         self.hyperparameters = hyperparameters
-        self.api_url = 'https://s3-api-uat.idesign.market/api/upload'
-        self.bucket_name = 'idesign-quotation'
-        self.model_path = f'model{str(uuid.uuid4())}.h5'
+        self.api_url = 'https://api.xanderco.in/core/store/'
+        self.model_path = f'bestmodel{str(uuid.uuid4())}.h5'
         self.scaler_path = f'scaler{str(uuid.uuid4())}.pkl'
+        self.label_encoder_path = f'label_encoder{str(uuid.uuid4())}.pkl'
         self.directory_path = "models"
         self.complete_model_path = os.path.join(self.directory_path, self.model_path)
         self.complete_scaler_path = os.path.join(self.directory_path, self.scaler_path)
+        self.complete_label_encoder_path = os.path.join(self.directory_path, self.label_encoder_path)
         self.userId = userId
+        self.coff = 0
 
         self.load_data()
         self.preprocess_data()
 
-    def textToNum(self, finalColumn, x):
-        arr = finalColumn.unique()
-        indices = np.where(arr == x)[0]
-        if indices.size > 0:
-            index = indices[0]
-            return index
-        else:
-            return -1
-
     def load_data(self):
         self.df = pd.read_csv(self.dataset_url)
-        
+        print(self.df)
+        self.df = self.df.dropna()
+        self.df = self.df.iloc[:25000]
         columns_to_drop = [col for col in self.df.columns if 'id' in col.lower()]
         self.df = self.df.drop(columns=columns_to_drop)
         
         self.X = self.df.iloc[:, :-1]
         self.y = self.df.iloc[:, -1]
 
-        if self.y.dtype == object:
-            self.y = self.y.apply(lambda x: self.textToNum(self.y, x))
+        self.label_encoders = {}
+        for column in self.X.select_dtypes(include=['object']).columns:
+            le = LabelEncoder()
+            self.X[column] = le.fit_transform(self.X[column])
+            self.label_encoders[column] = le
 
-        self.X = pd.get_dummies(self.X, drop_first=True)
+        if self.y.dtype == object:
+            self.y = LabelEncoder().fit_transform(self.y)
+
+        # correlation_matrix = self.X.corr().abs()
+        # upper_triangle = correlation_matrix.where(
+        #     pd.np.triu(pd.np.ones(correlation_matrix.shape), k=1).astype(pd.np.bool_)
+        # )
+        # self.coff = upper_triangle.stack().mean()
+
+        # tree_clf = DecisionTreeClassifier(max_depth=3)
+        # tree_clf.fit(self.X, self.y)
+        
+        # feature_importances = tree_clf.feature_importances_
+        
+        # mutual_info_scores = mutual_info_classif(self.X, self.y)
+        
+        # features_to_drop = [i for i in range(len(feature_importances)) 
+        #                     if feature_importances[i] == 0 or mutual_info_scores[i] < 0.01]
+
+        # self.X = self.X.drop(self.X.columns[features_to_drop], axis=1)
+        # print(self.X)
+        # print(len(list(self.df.values)))
+        # print("Final Features:", self.X.columns)
+
 
     def preprocess_data(self):
         self.scaler = StandardScaler()
         self.X_standardized = self.scaler.fit_transform(self.X)
         self.X = self.X_standardized
-        self.y = self.y.values
+        self.y = self.y
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             self.X, self.y, test_size=0.2, random_state=42)
+        
+    def residual_block(self, x, units, dropout_rate=0.3):
+        """A residual block with two Dense layers and a skip connection."""
+        shortcut = x
+        
+        # Adjust shortcut to match the new shape
+        if int(shortcut.shape[-1]) != units:
+            shortcut = Dense(units, activation=None)(shortcut)
+            shortcut = BatchNormalization()(shortcut)
+        
+        x = Dense(units, activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = Dropout(dropout_rate)(x)
+        
+        x = Dense(units, activation=None)(x)
+        x = BatchNormalization()(x)
+        
+        x = Add()([x, shortcut])
+        x = Activation('relu')(x)
 
+        return x
+    
     def create_model(self):
         unique_values = np.unique(self.y)
-        isBinary = len(unique_values) == 2
+        isBinary = len(unique_values) <= 2
         num_classes = len(unique_values)
 
-        self.model = tf.keras.Sequential()
-
+        print(self.X_train.shape[1])
         if self.task == "classification" and self.hasChanged:
             for arch in self.architecture:
                 if arch['layer'] == "Dense" and arch['define_input_shape'] == "true":
@@ -82,22 +126,92 @@ class ClassificationDL:
                 elif arch['layer'] == "Dropout":
                     self.model.add(Dropout(arch['ratio']))
         else:
-            self.model.add(Dense(128, input_shape=(self.X_train.shape[1],), activation="relu"))
-            self.model.add(Dropout(0.1))
-            self.model.add(Dense(64, activation="relu"))
-            self.model.add(Dropout(0.1))
-            self.model.add(Dense(32, activation="relu"))
+            if len(list(self.df.values)) <= 2000:
+                self.model = tf.keras.Sequential()
+                self.model.add(Dense(512, kernel_regularizer=l2(0.001), input_shape=(self.X_train.shape[1],), activation="relu"))
+                self.model.add(Dropout(0.3))
+                self.model.add(BatchNormalization())
 
-        if isBinary:
-            self.model.add(Dense(1, activation='sigmoid'))
-            self.model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-        else:
-            self.model.add(Dense(num_classes, activation='softmax'))
-            self.model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+                self.model.add(Dense(256, kernel_regularizer=l2(0.001), activation="relu"))
+                self.model.add(Dropout(0.3))
+                self.model.add(BatchNormalization())
+
+                self.model.add(Dense(128, kernel_regularizer=l2(0.001), activation="relu"))
+                self.model.add(Dropout(0.25))
+                # self.model.add(BatchNormalization())
+
+                self.model.add(Dense(64, kernel_regularizer=l2(0.001), activation="relu"))
+                self.model.add(Dropout(0.15))
+                # self.model.add(BatchNormalization())
+
+                self.model.add(Dense(32, kernel_regularizer=l2(0.001), activation="relu"))
+                # self.model.add(BatchNormalization())
+                # self.model.add(Dropout(0.15))
+
+                if isBinary:
+                    self.model.add(Dense(1, activation='sigmoid'))
+                    self.model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+                else:
+                    self.model.add(Dense(num_classes, activation='softmax'))
+                    self.model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+            elif len(list(self.df.values)) <= 5000:
+                self.model = tf.keras.Sequential()
+                self.model.add(Dense(512, kernel_regularizer=l2(0.01), input_shape=(self.X_train.shape[1],), activation="relu"))
+                self.model.add(Dropout(0.3))
+                self.model.add(BatchNormalization())
+
+                self.model.add(Dense(256, kernel_regularizer=l2(0.01), activation="relu"))
+                self.model.add(Dropout(0.3))
+                self.model.add(BatchNormalization())
+
+                self.model.add(Dense(128, kernel_regularizer=l2(0.01), activation="relu"))
+                self.model.add(Dropout(0.25))
+                # self.model.add(BatchNormalization())
+
+                self.model.add(Dense(64, kernel_regularizer=l2(0.01), activation="relu"))
+                self.model.add(Dropout(0.15))
+                # self.model.add(BatchNormalization())
+
+                self.model.add(Dense(32, kernel_regularizer=l2(0.01), activation="relu"))
+                # self.model.add(BatchNormalization())
+                # self.model.add(Dropout(0.15))
+
+                if isBinary:
+                    self.model.add(Dense(1, activation='sigmoid'))
+                    self.model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+                else:
+                    self.model.add(Dense(num_classes, activation='softmax'))
+                    self.model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+            else:
+                inputs = Input(shape=(self.X_train.shape[1],))
+                x = inputs
+                
+                x = Dense(512, activation='relu')(x)
+                x = BatchNormalization()(x)
+                x = Dropout(0.3)(x)
+
+                x = self.residual_block(x, 512, dropout_rate=0.3)
+                x = self.residual_block(x, 256, dropout_rate=0.3)
+                x = self.residual_block(x, 128, dropout_rate=0.3)
+                x = self.residual_block(x, 64, dropout_rate=0.2)
+
+                x = Dense(32, activation='relu')(x)
+                x = BatchNormalization()(x)
+                x = Dropout(0.2)(x)
+
+                if isBinary:
+                    outputs = Dense(1, activation='sigmoid')(x)
+                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                    self.model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+                else:
+                    outputs = Dense(num_classes, activation='softmax')(x)
+                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                    self.model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
     def train_model(self):
         self.epoch_data = []
-
+        self.current_val_acc = 0
         class CustomCallback(Callback):
             def __init__(self, outer_instance, validation_data):
                 super().__init__()
@@ -116,10 +230,14 @@ class ClassificationDL:
                     "test_loss": test_loss,
                     "test_acc": test_acc
                 }
-
                 self.outer_instance.epoch_data.append(epoch_info)
                 self.outer_instance.current_epoch_info = epoch_info
                 self.outer_instance.epoch_info_queue.put(epoch_info)
+
+                if test_acc > self.outer_instance.current_val_acc:
+                    self.outer_instance.save_model()
+                    self.outer_instance.current_val_acc = test_acc
+                    print(f"New best model saved with validation accuracy: {test_acc}")
 
         self.epoch_info_queue = queue.Queue()
         custom_callback = CustomCallback(
@@ -138,31 +256,32 @@ class ClassificationDL:
         y_pred_proba = self.model.predict(self.X_test)
         y_pred = (y_pred_proba > 0.5).astype(int)
         self.accuracy = accuracy_score(self.y_test, y_pred)
-        # print(f"Accuracy: {self.accuracy}")
 
     def save_model(self):
         if not os.path.exists(self.directory_path):
             os.makedirs(self.directory_path)
             model_path = os.path.join(self.directory_path, self.model_path)
             scaler_path = os.path.join(self.directory_path, self.scaler_path)
+            label_encoder_path = os.path.join(self.directory_path, self.label_encoder_path)
             self.model.save(model_path)
             joblib.dump(self.scaler, scaler_path)
+            joblib.dump(self.label_encoders, label_encoder_path)
         else:
             model_path = os.path.join(self.directory_path, self.model_path)
             scaler_path = os.path.join(self.directory_path, self.scaler_path)
+            label_encoder_path = os.path.join(self.directory_path, self.label_encoder_path)
             self.model.save(model_path)
             joblib.dump(self.scaler, scaler_path)
+            joblib.dump(self.label_encoders, label_encoder_path)
 
     def upload_files_to_api(self):
         try:
-            files = {
-                'bucketName': (None, self.bucket_name),
-                'files': open(self.complete_model_path, 'rb')
+            file = {
+                'file': open(self.complete_model_path, 'rb')
             }
-            response_model = requests.put(self.api_url, files=files)
+            response_model = requests.post(self.api_url, files=file)
             response_data_model = response_model.json()
-            model_url = response_data_model.get('locations', [])[
-                0] if response_model.status_code == 200 else None
+            model_url = response_data_model.get('file_url')
 
             if model_url:
                 print(f"Model uploaded successfully. URL: {model_url}")
@@ -171,14 +290,13 @@ class ClassificationDL:
                     f"Failed to upload model. Error: {response_data_model.get('error')}")
                 return None, None
 
-            files = {
-                'bucketName': (None, self.bucket_name),
-                'files': open(self.complete_scaler_path, 'rb')
+            file = {
+                'file': open(self.complete_scaler_path, 'rb')
             }
-            response_scaler = requests.put(self.api_url, files=files)
+
+            response_scaler = requests.post(self.api_url, files=file)
             response_data_scaler = response_scaler.json()
-            scaler_url = response_data_scaler.get(
-                'locations', [])[0] if response_scaler.status_code == 200 else None
+            scaler_url = response_data_scaler.get('file_url')
 
             if scaler_url:
                 print(f"Scaler uploaded successfully. URL: {scaler_url}")
@@ -186,8 +304,23 @@ class ClassificationDL:
                 print(
                     f"Failed to upload scaler. Error: {response_data_scaler.get('error')}")
                 return model_url, None
+            
+            file = {
+                'file': open(self.complete_label_encoder_path, 'rb')
+            }
 
-            return model_url, scaler_url
+            response_label = requests.post(self.api_url, files=file)
+            response_data_label = response_label.json()
+            label_url = response_data_label.get('file_url')
+
+            if label_url:
+                print(f"label uploaded successfully. URL: {label_url}")
+            else:
+                print(
+                    f"Failed to upload label. Error: {response_data_label.get('error')}")
+            
+            print(model_url, scaler_url, label_url)
+            return model_url, scaler_url, label_url
 
         except requests.exceptions.RequestException as e:
             print(f"An error occurred: {str(e)}")
@@ -205,9 +338,12 @@ class ClassificationDL:
         training_thread.join()
 
         # self.evaluate_model()
-        self.save_model()
-        model_url, scaler_url = self.upload_files_to_api()
-
+        # model_url = ""
+        # scaler_url = ""
+        # label_url = ""
+        
+        model_url, scaler_url, label_url = self.upload_files_to_api()
+        
         _id = str(uuid.uuid4())
 
         df = pd.read_csv(self.dataset_url)
@@ -286,7 +422,7 @@ if __name__ == "__main__":
     if model and scaler:
         df = pd.read_csv(dataset_url)
         column_names = df.columns.drop(df.columns[-1]).tolist()
-        categorical_columns = df.select_dtypes(include=['object']).columns.tolist()
+        categorical_columns = df.drop(columns=df.columns[-1]).select_dtypes(include=['object']).columns.tolist()
 
         data_scaled = preprocess_input(input_data, scaler, categorical_columns, column_names)
 
@@ -303,7 +439,7 @@ if __name__ == "__main__":
         '''
         
         api_code_python = f'''
-        import requests
+import requests
 import json
 
 url = "https://api.xanderco.in/core/interference/" 
@@ -359,12 +495,11 @@ fetch(url, {{
     console.error(`An error occurred: ${{error}}`);
 }});
 '''
-
         model_obj = {
             "modelUrl": model_url if model_url and scaler_url else "",
             "size": os.path.getsize(self.complete_model_path) / (1024 ** 3) if model_url and scaler_url else 0,
             "id": _id if model_url and scaler_url else "",
-            "helpers": [{"scaler": scaler_url}] if model_url and scaler_url else [],
+            "helpers": [{"scaler": scaler_url}, {"label_encoders": label_url}] if model_url and scaler_url else [],
             "modelArch": self.architecture,
             "hyperparameters": self.hyperparameters,
             "epoch_data": self.epoch_data,
