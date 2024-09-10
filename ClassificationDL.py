@@ -46,7 +46,13 @@ class ClassificationDL:
         self.df = self.df.dropna()
         self.df = self.df.iloc[:25000]
         columns_to_drop = [col for col in self.df.columns if 'id' in col.lower()]
+        
+        def contains_url(column):
+            return column.str.contains(r'http[s]?://', na=False).any()    
+        url_columns = [col for col in self.df.columns if contains_url(self.df[col])]
+
         self.df = self.df.drop(columns=columns_to_drop)
+        self.df = self.df.drop(columns=url_columns)
         
         self.X = self.df.iloc[:, :-1]
         self.y = self.df.iloc[:, -1]
