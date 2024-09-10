@@ -110,7 +110,7 @@
         }
       ],
       "hyperparameters": {
-        "epochs": 10,
+        "epochs": 100,
         "batch_size": 32,
         "validation_size": 0.2
       }

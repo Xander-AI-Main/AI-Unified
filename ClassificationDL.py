@@ -58,28 +58,14 @@ class ClassificationDL:
             self.label_encoders[column] = le
 
         if self.y.dtype == object:
-            self.y = LabelEncoder().fit_transform(self.y)
+            le = LabelEncoder()
+            self.y = le.fit_transform(self.y)
+            self.label_encoders['target'] = le
 
-        # correlation_matrix = self.X.corr().abs()
-        # upper_triangle = correlation_matrix.where(
-        #     pd.np.triu(pd.np.ones(correlation_matrix.shape), k=1).astype(pd.np.bool_)
-        # )
-        # self.coff = upper_triangle.stack().mean()
-
-        # tree_clf = DecisionTreeClassifier(max_depth=3)
-        # tree_clf.fit(self.X, self.y)
-        
-        # feature_importances = tree_clf.feature_importances_
-        
-        # mutual_info_scores = mutual_info_classif(self.X, self.y)
-        
-        # features_to_drop = [i for i in range(len(feature_importances)) 
-        #                     if feature_importances[i] == 0 or mutual_info_scores[i] < 0.01]
-
-        # self.X = self.X.drop(self.X.columns[features_to_drop], axis=1)
-        # print(self.X)
-        # print(len(list(self.df.values)))
-        # print("Final Features:", self.X.columns)
+        # Ensure labels start from 0 and are continuous
+        unique_labels = np.unique(self.y)
+        label_map = {label: i for i, label in enumerate(unique_labels)}
+        self.y = np.array([label_map[label] for label in self.y])
 
 
     def preprocess_data(self):
